@@ -71,16 +71,103 @@ class ScratchNet:
             layer.initialize_parameters() # hier werden für jeden Layer die Gewichte und Biase initiiert
 
     def fit(self, train_images, train_labels, epochs=1):
+        # Preprocessing der Trainingsdaten durch den input-Layer
+        train_images, train_labels = self.layers[0].prepare_inputs(
+            train_images, train_labels
+        )
+        training_data = list(zip(train_images, train_labels))
+        losses, accuracies = self._gradient_descent(training_data, epochs=epochs)
+        return losses, accuracies
+
+    def _gradient_descent(self, training_data, epochs=1):
+        losses, accuracies = list(), list()
+        for epoch in trange(epochs):
+            self._update_parameters(training_data)
+            loss, accuracy = (
+                self._calculate_loss(training_data),
+                self._calculate_accuracy(training_data),
+            )
+            losses.append(loss)
+            accuracies.append(accuracy)
+            print(
+                "Epoch {0}: loss ={1:.3f} acc={2:.2f}".format(epoch + 1, loss, accuracy)
+            )
+        return losses, accuracies
+
+    def _update_parameters(self, input_samples):
+        weight_gradients = [np.zeros(layer.weights.shape) for layer in self.layers[1:]]
+        bias_gradients = [np.zeros(layer.biases.shape) for layer in self.layers[1:]]
+
+        #Summe aller Gewichts- und Bias Updates
+        for sample in input_samples:
+            sample_weight_gradients, sample_bias_gradients = self._backpropagate(sample)
+            # Addiert zu den Gradienten
+            weight_gradients = np.add(weight_gradients, sample_weight_gradients)
+            bias_gradients = np.add(bias_gradients, sample_bias_gradients)
+
+        # Durchschnitt über alle Gewichts- und Bias Updates
+        # Der Einfluss der Updates wird durch die 'Learning_rate' beeinflusst
+        for layer, layer_weight_gradients, layer_bias_gradients in zip(
+            self.layers[1:], weight_gradients, bias_gradients
+        ):
+            layer.weights += (
+                    self.learning_rate * layer_weight_gradients / len(input_samples)
+        )
+            layer.biases += (
+                    self.learning_rate * layer_bias_gradients / len(input_samples)
+            )
+
+    def _backpropagation(self, training_sample):
+        train_input, train_output = training_sample
+        self._feed_forward(train_input)
+        # Berechnet die Gradienten des letzten Layer in Abhängigkeit der Kostenfunktion
+        gradients = self.layers[-1].compute_cost_gradients(
+            train_output, cost_func=self.cost_func
+        )
+
+        # Nur für die Hidden Layer werden die Gradienten rückwärts durch das netz propagiert
+        for layer in reversed(self.layers[1:-1]):
+            # 'gradients' wird mit jedem Layer überschrieben
+            gradients = layer.feed_backward_layer(gradients)
+
+        # Akkumuliert alle Gradienten, die mit Backpropagation berechnet wurden
+        weight_gradients = [layer.weight_gradients for layer in self.layers[1:]]
+        bias_gradients = [layer.bias_gradients for layer in self.layers[1:]]
+        return weight_gradients, bias_gradients
+
+
+
+
+    def _calculate_accuracy(self, input_samples):
         raise NotImplementedError()
 
-    def predict(self, model_inputs):
+    def _calculate_loss(self, input_samples):
         raise NotImplementedError()
+
+
+    def predict(self, model_inputs):
+        # preprocessing der 'model_inputs' durch den Input-Layer
+        model_inputs = self.layers[0].prepare_inputs(model_inputs) # reshapen
+        predicted = np.zeros((model_inputs.shape[0], self.layers[-1].neuron_count, 1))
+        for i, model_input in enumerate(model_inputs):
+            predicted[i] = self._feed_forward(model_input)
+        return predicted
+
+    def _feed_forward(self, input_sample):
+        for layer in self.layers:
+            # input_sample wird mit jedem Layer überschrieben
+            input_sample = layer.feed_forward_layer(input_sample)
+        return input_sample
+
 
     def evaluate(self, validation_images, validation_labels):  # funktioniert wie bei keras
         raise NotImplementedError()
 
     def compile(self, learning_rate=None, los=None):  # das Netz parametrieren
-        raise NotImplementedError()
+        # soll einfach die definierten Werte im Netz speichern
+        self.learning_rate = learning_rate or self.learning_rate
+        self.cost_func = los or self.cost_func
+
 
     def inspect(self):  # Struktur des netes ausdrucken
         print(f"---------- {self.__class__.__name__} ----------")
@@ -109,11 +196,28 @@ class DenseLayer:
         self.weights = weights
         self.biases = biases
 
+    def prepare_inputs(self, images, labels=None):
+        return images if labels is None else images, labels
+
+    def feed_forward_layer(self, input_activations):
+        self.layer_inputs = np.dot(self.weights, input_activations) + self.biases
+        self.activation_vec = self.activation_func(self.layer_inputs)
+        return self.activation_vec
+
+
+
     def initialize_parameters(self):
         if self.weights is None: # zufällig erstellte Matrix mit Werten aus der Standardnormalverteilung
             self.weights = np.random.randn(self.neuron_count, self.prev_layer.neuron_count)
         if self.biases is None:
             self.biases = np.random.randn(self.neuron_count, 1)
+
+    def compute_cost_gradients(self, label_vec, cost_func):
+        raise NotImplementedError()
+
+    def feed_backward_layer(self, prev_input_gradients):
+        raise NotImplementedError()
+
 
     def inspect(self):
         print(f"---------- Layer L={self.depth} ----------")
@@ -124,6 +228,7 @@ class DenseLayer:
                 for w in self.weights[n]:
                     print(f"    Weight: {w}")
                 print(f"    Bias: {self.biases[n][0]}")
+
 
 
 
@@ -143,6 +248,20 @@ class FlattenLayer(DenseLayer): # Spezialisierung des DenseLayers, normalerweise
 
     def initialize_parameters(self): # keine Weights und Biases in einer Flatten-Layer
         pass
+
+    def feed_forward_layer(self, input_activations):
+        self.activation_vec = input_activations
+        return self.activation_vec
+
+
+    def prepare_inputs(self, images, labels=None):
+        flattened_images = images.reshape(images.shape[0], self.neuron_count, 1)
+        if labels is not None:
+            labels = labels.reshape(labels.shape[0], -1, 1)
+            return flattened_images, labels
+        return flattened_images
+
+
 
 
 def xor():
@@ -166,7 +285,8 @@ def xor():
     train_inputs = np.tile(train_inputs, repeat)
     train_vec_labels = np.tile(train_vec_labels, repeat)
 
-    model.inspect()
+    predicted = model.predict(np.array([[0, 0]]))
+    print(predicted)
     return
 
     model.compile(learning_rate=0.1, loss=SquaredError()) # kein Optimizer, nur ein Lernverfahren
